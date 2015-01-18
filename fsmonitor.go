@@ -1,7 +1,8 @@
 package fsmonitor
 
 import (
-	"github.com/go-fsnotify/fsnotify"
+	"code.google.com/p/go.exp/fsnotify"
+  "github.com/datastream/btree"
 	"os"
 	"path/filepath"
 )
@@ -25,14 +26,16 @@ func NewWatcherWithSkipFolders(skipFolders []string) (*Watcher, error) {
 }
 
 func initWatcher(watcher *fsnotify.Watcher, skipFolders []string) *Watcher {
-	event := make(chan *fsnotify.Event)
+	event := make(chan *fsnotify.FileEvent)
 	watcherError := make(chan error)
-	monitorWatcher := &Watcher{Events: event, Error: watcherError, watcher: watcher, SkipFolders: skipFolders}
+  tree := btree.NewBtree()
+	monitorWatcher := &Watcher{Event: event, Error: watcherError, watcher: watcher, SkipFolders: skipFolders, watchTree: tree}
 	go func() {
 		for {
 			select {
-			case ev := <-watcher.Events:
-				if ev.Op&fsnotify.Create == fsnotify.Create {
+			case ev := <-watcher.Event:
+				event <- ev
+				if ev.IsCreate() {
 					go func() {
 						if f, err := os.Stat(ev.Name); err == nil {
 							if f.IsDir() {
@@ -42,13 +45,13 @@ func initWatcher(watcher *fsnotify.Watcher, skipFolders []string) *Watcher {
 
 					}()
 				}
-				if ev.Op&fsnotify.Remove == fsnotify.Remove {
+				if ev.IsDelete() {
 					go func() {
-						watcher.Remove(ev.Name)
+            monitorWatcher.Remove(ev.Name)
+						// watcher.RemoveWatch(ev.Name)
 					}()
 				}
-				monitorWatcher.Events <- &ev
-			case e := <-watcher.Errors:
+			case e := <-watcher.Error:
 				watcherError <- e
 			}
 		}
@@ -57,10 +60,11 @@ func initWatcher(watcher *fsnotify.Watcher, skipFolders []string) *Watcher {
 }
 
 type Watcher struct {
-	Events      chan *fsnotify.Event
+	Event       chan *fsnotify.FileEvent
 	Error       chan error
 	SkipFolders []string
 	watcher     *fsnotify.Watcher
+  watchDir    *btree.Btree
 }
 
 func (self *Watcher) Watch(path string) error {
@@ -84,8 +88,14 @@ func (self *Watcher) watchAllFolders(path string) (err error) {
 					return filepath.SkipDir
 				}
 			}
+      err := self.watchTree.Insert([]byte(path), []byte(path))
+      if err != nil {
+        return err
+      }
 			err := self.addWatcher(path)
 			if err != nil {
+        // 失敗したらTreeから取り除く
+        self.watchTree.Delete([]byte(path))
 				return err
 			}
 		}
@@ -95,6 +105,11 @@ func (self *Watcher) watchAllFolders(path string) (err error) {
 }
 
 func (self *Watcher) addWatcher(path string) (err error) {
-	err = self.watcher.Add(path)
+	err = self.watcher.Watch(path)
 	return
+}
+
+func (self *Watcher) Remove(path string) (err error) {
+  err = self.watcher.RemoveWatch(path)
+  return
 }
